@@ -8,7 +8,7 @@ RUN apt-get update \
         libssl-dev \
         pkg-config \
     && rustup target add x86_64-unknown-linux-musl \
-    && cargo install --target x86_64-unknown-linux-musl cross
+    && cargo install --target x86_64-unknown-linux-musl
 
 # Set the working directory
 WORKDIR /workspace
@@ -16,12 +16,12 @@ WORKDIR /workspace
 # Copy the Cargo.toml and Cargo.lock to help with caching dependencies
 COPY Cargo.toml Cargo.lock ./
 
-# Create a new empty package
-RUN cargo new --bin gh-hook-watcher
+# # Create a new empty package
+# RUN cargo new --bin gh-hook-watcher
 WORKDIR /workspace/gh-hook-watcher
 
 # Copy the rest of your application code
 COPY . .
 
-# Build the application in release mode for the x86_64 target
-RUN cargo build --release --target=x86_64-unknown-linux-musl
+# # Build the application in release mode for the x86_64 target
+# RUN cargo build --release --target=x86_64-unknown-linux-musl
