@@ -1,7 +1,7 @@
 #![allow(unused_imports, dead_code)]
 use axum::{
     extract::Json,
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Router,
@@ -43,7 +43,7 @@ struct Author {
 #[tokio::main]
 async fn main() {
     FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_max_level(Level::DEBUG)
         .compact()
         .init();
 
@@ -73,14 +73,18 @@ async fn handle_webhook(
             payload.repository.full_name
         );
 
+        debug!("Full Payload: {:#?}", payload);
+
         // Log info about each commit in the push
         for commit in payload.commits {
-            info!("Commit: {} by {} ({})\nMessage: {}",
-            &commit.id[..7],
-            commit.author.name,
-            commit.author.email,
-            commit.message)
-        };
+            info!(
+                "Commit: {} by {} ({})\nMessage: {}",
+                &commit.id[..7],
+                commit.author.name,
+                commit.author.email,
+                commit.message
+            )
+        }
 
         // Custom Logic to do when webhook is triggered
         // for now, log debug msg
@@ -95,7 +99,21 @@ async fn handle_webhook(
     };
 }
 
-async fn root_handler() -> &'static str {
+
+async fn root_handler() -> impl IntoResponse {
     info!("Root handler called");
-    "GitHub Hook Watcher"
+    debug!("Debug working?");
+    let body = serde_json::json!({
+        "code": 200,
+        "msg": "Github Hooks Watcher",
+        "hasError": false,
+        "error": Option::<String>::None,
+    })
+    .to_string();
+    let mut headers = HeaderMap::new();
+    headers.append(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    (StatusCode::OK, headers, body)
 }
