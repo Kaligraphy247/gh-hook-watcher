@@ -1,4 +1,11 @@
-#![allow(unused_imports, dead_code)]
+use serde_json::json;
+use ring::hmac::{self, Key};
+use tracing::{debug, info, Level};
+use dotenv::dotenv;
+use hex::FromHexError;
+use std::net::SocketAddr;
+use tokio::net::TcpListener;
+use tracing_subscriber::FmtSubscriber;
 use axum::{
     extract::Json,
     http::{header, HeaderMap, StatusCode},
@@ -6,42 +13,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
-
-use serde::Deserialize;
-use std::net::SocketAddr;
-use tokio::net::TcpListener;
-use tracing::{debug, info, Level};
-use tracing_subscriber::FmtSubscriber;
-
-#[derive(Debug, Deserialize)]
-struct GithubPushEvent {
-    #[serde(rename = "ref")] // GitHub uses "ref" which is a keyword in Rust
-    reference: String,
-    repository: Repository,
-    commits: Vec<Commit>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Repository {
-    name: String,      // Repository Name
-    full_name: String, // Full repository name (owner/repo)
-}
-
-#[derive(Debug, Deserialize)]
-struct Commit {
-    id: String,
-    message: String,
-    author: Author,
-}
-
-#[derive(Debug, Deserialize)]
-struct Author {
-    name: String,
-    email: String,
-}
+use gh_hook_watcher::GitHubPayloadBody;
 
 #[tokio::main]
 async fn main() {
+    dotenv().ok();
     FmtSubscriber::builder()
         .with_max_level(Level::DEBUG)
         .compact()
@@ -64,46 +40,83 @@ async fn main() {
 }
 
 async fn handle_webhook(
-    Json(payload): Json<GithubPushEvent>, //automatically parse JSON into GithubPushEvent
+    headers: HeaderMap,
+    Json(payload): Json<GitHubPayloadBody>,
 ) -> impl IntoResponse {
-    if payload.reference == "refs/heads/main" {
-        //  Log repo information
-        info!(
-            "Received push to main branch in repository: {}",
-            payload.repository.full_name
-        );
-
-        debug!("Full Payload: {:#?}", payload);
-
-        // Log info about each commit in the push
-        for commit in payload.commits {
-            info!(
-                "Commit: {} by {} ({})\nMessage: {}",
-                &commit.id[..7],
-                commit.author.name,
-                commit.author.email,
-                commit.message
+    // Verify webhook signature
+    let webhook_secret = match std::env::var("GH_WEBHOOK_SECRET") {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                json!({"msg": e.to_string()}).to_string(),
             )
         }
-
-        // Custom Logic to do when webhook is triggered
-        // for now, log debug msg
-        debug!("Action Triggered will run just below here");
-        debug!("Should be non-blocking, and return immediately");
-        debug!("Actions, include CI/CD, send notifications, run automated tests");
-        debug!("end");
-        StatusCode::OK // Return 200 if everything is successful
-    } else {
-        info!("Received push to non-main branch: {}", payload.reference);
-        StatusCode::OK
     };
+    let secret_key = Key::new(hmac::HMAC_SHA256, webhook_secret.as_bytes());
+    let signature = match get_signature_from_header(&headers) {
+        Ok(sig) => sig,
+        Err(e) => return (StatusCode::BAD_REQUEST, json!({"msg": e}).to_string()),
+    };
+    let message = match payload.convert_to_json_string() {
+        Ok(msg) => msg,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                json!({"msg": "failed to convert payload"}).to_string(),
+            )
+        }
+    };
+    let verified = verify_signature(&secret_key, message.as_bytes(), &signature);
+
+    if verified {
+        // what to listen for
+        if payload.reference == "refs/heads/main" {
+            //  Log repo information
+            info!(
+                "Received push to main branch in repository: {}",
+                payload.repository.full_name
+            );
+
+            // Log info about each commit in the push
+            for commit in payload.commits {
+                info!(
+                    "Commit: {} by {} ({})\nMessage: {}",
+                    &commit.id[..7],
+                    commit.author.name,
+                    commit.author.email,
+                    commit.message
+                )
+            }
+
+            // Custom Logic to do when webhook is triggered
+            // for now, log debug msg
+            debug!("Action Triggered will run just below here");
+            debug!("Should be non-blocking, and return immediately");
+            debug!("Actions, include CI/CD, send notifications, run automated tests");
+            debug!("end");
+            (StatusCode::OK, json!({"msg": "Success"}).to_string())
+        } else {
+            info!(
+                "Received push to non-main branch: {:?}",
+                payload.convert_to_json_string()
+            );
+            (
+                StatusCode::OK,
+                json!({"msg": "Received push on non-main branch"}).to_string(),
+            )
+        }
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"msg": "Signature verification failed"}).to_string(),
+        )
+    }
 }
 
-
-async fn root_handler() -> impl IntoResponse {
+async fn root_handler(_headers: HeaderMap) -> impl IntoResponse {
     info!("Root handler called");
-    debug!("Debug working?");
-    let body = serde_json::json!({
+    let body = json!({
         "code": 200,
         "msg": "Github Hooks Watcher",
         "hasError": false,
@@ -116,4 +129,21 @@ async fn root_handler() -> impl IntoResponse {
         header::HeaderValue::from_static("application/json"),
     );
     (StatusCode::OK, headers, body)
+}
+
+fn get_signature_from_header(headers: &HeaderMap) -> Result<Vec<u8>, &'static str> {
+    let signature = headers
+        .get("X-Hub-Signature-256")
+        .ok_or("Missing X-Hub-Signature-256 header")?
+        .to_str()
+        .map_err(|_| "Invalid X-Hub-Signature-256 header format")?
+        .strip_prefix("sha256=")
+        .ok_or("X-Hub-Signature-256 header missing prefix")?;
+
+    hex::decode(signature).map_err(|_: FromHexError| "Invalid X-Hub-Signature-256 hex value")
+}
+
+fn verify_signature(secret_key: &Key, message: &[u8], expected_signature: &[u8]) -> bool {
+    let verified = hmac::verify(secret_key, message, expected_signature);
+    verified.is_ok()
 }
